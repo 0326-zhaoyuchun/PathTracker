@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>路径分析引擎 V5.1 (最终防弹版)</title>
+    <link rel="icon" type="image/png" href="favicon.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        :root { --global-chart-height: 55%; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        .drag-active { border-color: #6366f1 !important; background-color: #eef2ff !important; }
+        .node-block.dragging { opacity: 0.5; border: 2px dashed #6366f1; }
+        #rule-modal { transition: opacity 0.2s; }
+        .toggle-checkbox:checked { right: 0; border-color: #6366f1; }
+        .toggle-checkbox:checked + .toggle-label { background-color: #6366f1; }
+        .toggle-checkbox:checked + .toggle-label:after { transform: translateX(100%); border-color: white; }
+        .resizer-x:hover, .panel-resizer-x:hover { background-color: rgba(99, 102, 241, 0.15); cursor: col-resize; }
+        .resizer-x:hover .indicator, .panel-resizer-x:hover .indicator { background-color: #6366f1; }
+        .panel-resizer-y:hover { background-color: rgba(99, 102, 241, 0.15); cursor: row-resize; }
+        .panel-resizer-y:hover .indicator { background-color: #6366f1; }
+        .workspace-scroll { scroll-behavior: smooth; }
+        .spinner { border: 4px solid rgba(255,255,255,0.3); border-radius: 50%; border-top: 4px solid #fff; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+    <script>
+        window.onerror = function(message, source, lineno) {
+            const loader = document.getElementById('global-loader');
+            const text = document.getElementById('loader-text');
+            const subtext = document.getElementById('loader-subtext');
+            const spinner = document.getElementById('loader-spinner');
+            const closeBtn = document.getElementById('loader-close-btn');
+            if(loader && text && subtext) {
+                text.innerText = "系统运行状态异常";
+                text.classList.add("text-red-400");
+                subtext.innerText = message + " (行号: " + lineno + ")";
+                spinner.classList.add("hidden");
+                closeBtn.classList.remove("hidden");
+                loader.classList.remove('hidden');
+            }
+        };
+    </script>
+</head>
+<body class="bg-slate-100 text-slate-800 h-screen flex overflow-hidden font-sans drag-auto">
+
+    <div id="global-loader" class="fixed inset-0 bg-slate-900/85 z-[100] flex flex-col items-center justify-center hidden backdrop-blur-md transition-opacity">
+        <div id="loader-spinner" class="spinner mb-4"></div>
+        <h2 class="text-white text-lg font-bold tracking-wider" id="loader-text">引擎正在高速处理中...</h2>
+        <p class="text-slate-300 text-sm mt-2" id="loader-subtext">请稍候</p>
+        <button id="loader-close-btn" class="mt-6 px-6 py-2 bg-red-500 text-white rounded font-bold hidden hover:bg-red-600 transition shadow-lg" onclick="document.getElementById('global-loader').classList.add('hidden')">关闭警告并重试</button>
+    </div>
+
+    <aside id="sidebar" class="bg-white border-r border-slate-200 p-5 flex flex-col h-full shadow-sm z-10 shrink-0 relative" style="width: 360px; min-width: 300px; max-width: 600px;">
+        <h1 class="text-xl font-bold text-indigo-600 mb-4 flex items-center gap-2 shrink-0">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
+            PathTracker 5.1
+        </h1>
+
+        <div class="mb-4 shrink-0">
+            <div class="flex justify-between items-end mb-2">
+                <h2 class="text-sm font-semibold text-slate-700">1. 导入业务数据</h2>
+                <select id="encoding-select" class="text-xs border border-slate-300 rounded px-1 text-slate-500 outline-none bg-slate-50">
+                    <option value="UTF-8">UTF-8 (现代通用标准)</option>
+                    <option value="GBK">GBK (老版防乱码备用)</option>
+                </select>
+            </div>
+            <label id="drop-zone" class="block border-2 border-dashed border-indigo-300 bg-indigo-50/50 rounded-lg p-3 text-center transition cursor-pointer hover:border-indigo-500 hover:bg-indigo-50 relative overflow-hidden group">
+                <input type="file" id="data-file" accept=".csv, .xlsx, .xls" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10">
+                <div class="text-indigo-500 mb-1 flex justify-center group-hover:scale-110 transition-transform">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                </div>
+                <span id="upload-text" class="text-xs font-bold text-indigo-700 block pointer-events-none">点击或拖拽上传 Excel/CSV 数据</span>
+            </label>
+        </div>
+
+        <div class="mb-3 p-3 bg-indigo-50 border border-indigo-100 rounded-lg flex justify-between items-center shadow-sm shrink-0">
+            <div>
+                <div class="text-sm font-bold text-indigo-800">动态多轨对比模式</div>
+                <div class="text-[10px] text-indigo-500 mt-0.5">开启后可独立命名并对比多组数据</div>
+            </div>
+            <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                <input type="checkbox" id="compare-toggle" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 appearance-none cursor-pointer transition-transform duration-200 ease-in-out border-slate-300 z-10"/>
+                <label for="compare-toggle" class="toggle-label block overflow-hidden h-5 rounded-full bg-slate-300 cursor-pointer transition-colors duration-200 ease-in-out"></label>
+            </div>
+        </div>
+
+        <div id="dynamic-tabs-container" class="flex gap-1 mb-2 hidden overflow-x-auto pb-1 shrink-0 px-1 border-b border-slate-200 items-center"></div>
+
+        <div id="all-filters-wrapper" class="flex-1 flex flex-col overflow-hidden relative">
+            <div class="absolute inset-0 flex items-center justify-center text-slate-400 text-sm italic" id="filter-empty-state">等待数据源导入...</div>
+        </div>
+
+        <div class="mt-auto pt-3 border-t border-slate-200 shrink-0 bg-white z-10">
+            <div class="flex items-center justify-between mb-1">
+                <label class="text-xs font-semibold text-slate-500">过滤流失分支 (最少人数)</label>
+                <span class="text-xs font-bold text-indigo-600 bg-indigo-50 px-1.5 rounded" id="threshold-val">2 人</span>
+            </div>
+            <input type="range" id="threshold-slider" min="1" max="50" value="2" class="w-full accent-indigo-600 mb-4" oninput="document.getElementById('threshold-val').innerText = this.value + ' 人'">
+            
+            <button id="btn-generate" disabled class="w-full bg-indigo-600 text-white hover:bg-indigo-700 disabled:bg-slate-300 py-3 rounded-md text-sm font-bold shadow-md transition-all">
+                🚀 生成多维对比视图
+            </button>
+        </div>
+    </aside>
+
+    <div id="resizer-x" class="w-2 cursor-col-resize flex flex-col items-center justify-center relative z-20 resizer-x group shrink-0 bg-slate-100 border-r border-slate-200">
+        <div class="h-8 w-1 bg-slate-300 rounded-full indicator transition-colors"></div>
+    </div>
+
+    <main class="flex-1 flex flex-col h-full relative overflow-hidden bg-slate-100">
+        <div id="path-builder-section" class="bg-white border-b border-slate-200 p-4 shadow-sm z-10 min-h-[90px] shrink-0 flex flex-col justify-center">
+            <div class="flex justify-between items-center mb-3">
+                <div class="flex items-center gap-3">
+                    <h2 class="text-sm font-bold text-slate-700 flex items-center gap-2">
+                        <svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path></svg>
+                        2. 全局业务节点构建区
+                    </h2>
+                    <span class="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded font-bold">支持滚轮缩放与拖拽平移</span>
+                </div>
+                <div class="flex gap-2 bg-slate-100 p-1 rounded-lg" id="chart-type-selector">
+                    <label class="cursor-pointer px-4 py-1.5 text-xs font-medium rounded-md transition-all bg-white shadow-sm text-indigo-600" data-type="sankey">
+                        <input type="radio" name="chartType" value="sankey" class="hidden" checked> 桑基流转图
+                    </label>
+                    <label class="cursor-pointer px-4 py-1.5 text-xs font-medium rounded-md transition-all text-slate-500 hover:text-slate-800" data-type="tree">
+                        <input type="radio" name="chartType" value="tree" class="hidden"> 树状发散图
+                    </label>
+                    <label class="cursor-pointer px-4 py-1.5 text-xs font-medium rounded-md transition-all text-slate-500 hover:text-slate-800" data-type="funnel">
+                        <input type="radio" name="chartType" value="funnel" class="hidden"> 漏斗转化图
+                    </label>
+                </div>
+            </div>
+            <div id="path-builder-container" class="flex flex-wrap items-center gap-2">
+                <div class="text-sm font-bold text-indigo-500 bg-indigo-50 px-3 py-1.5 rounded animate-pulse" id="empty-builder-tip">← 等待数据导入...</div>
+            </div>
+        </div>
+
+        <div id="infinite-workspace" class="flex-1 flex overflow-x-auto overflow-y-hidden p-4 gap-0 workspace-scroll relative bg-slate-100">
+            <div id="workspace-empty" class="absolute inset-0 flex flex-col items-center justify-center text-slate-400 z-50 bg-slate-100 transition-opacity duration-300">
+                <svg class="w-20 h-20 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"></path></svg>
+                <p class="font-bold text-slate-500">上传数据即可自动生成全景图表</p>
+            </div>
+            <div id="panels-container" class="flex h-full min-w-full opacity-0 transition-opacity duration-500"></div>
+        </div>
+    </main>
+
+    <div id="rule-modal" class="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center hidden opacity-0">
+        <div class="bg-white rounded-xl shadow-xl w-[660px] flex flex-col overflow-hidden transform transition-all">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-base font-bold text-slate-800">节点数据处理规则: <span id="modal-col-name" class="text-indigo-600 ml-1"></span></h3>
+                <button onclick="closeRuleModal()" class="text-slate-400 hover:text-red-500">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 flex-1 overflow-y-auto modal-body">
+                <div class="mb-4">
+                    <label class="flex items-center gap-2 cursor-pointer mb-2">
+                        <input type="radio" name="rule-type" value="raw" checked class="accent-indigo-600 w-4 h-4">
+                        <span class="text-sm font-medium text-slate-700">直接显示原始值</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" name="rule-type" value="range" class="accent-indigo-600 w-4 h-4">
+                        <span class="text-sm font-medium text-slate-700">按数值区间分组 (完美支持开闭区间)</span>
+                    </label>
+                </div>
+                <div id="range-rules-container" class="hidden border border-slate-200 rounded-lg p-4 bg-slate-50">
+                    <div class="text-xs text-slate-500 mb-3 flex justify-between">
+                        <span>匹配规则：自上而下验证，满足即停</span>
+                    </div>
+                    <div id="rule-list" class="flex flex-col gap-2"></div>
+                    <button onclick="addRuleRow()" class="mt-3 text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 bg-indigo-50 px-2 py-1 rounded">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg> 添加规则
+                    </button>
+                </div>
+            </div>
+            <div class="px-6 py-4 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
+                <button onclick="closeRuleModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-200 rounded-lg transition">取消</button>
+                <button onclick="saveRules()" class="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition shadow-sm">保存并应用</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ----------------------------------------------------
+        // 🌟 1. 核心状态
+        // ----------------------------------------------------
+        let rawData = []; 
+        let columnNames = []; 
+        let selectedPathNodes = []; 
+        let currentChartType = 'sankey'; 
+        let editingNodeIndex = -1; 
+        let isCompareMode = false;
+
+        const basePalette = [
+            { id: 'A', name: '基准大盘', color: '#4f46e5', light: '#e0e7ff', border: '#c7d2fe' }, 
+            { id: 'B', name: '对比组 B', color: '#10b981', light: '#d1fae5', border: '#a7f3d0' }, 
+            { id: 'C', name: '对比组 C', color: '#f59e0b', light: '#fef3c7', border: '#fde68a' }, 
+            { id: 'D', name: '对比组 D', color: '#f43f5e', light: '#ffe4e6', border: '#fecdd3' }, 
+            { id: 'E', name: '对比组 E', color: '#06b6d4', light: '#cffafe', border: '#a5f3fc' }, 
+            { id: 'F', name: '对比组 F', color: '#8b5cf6', light: '#ede9fe', border: '#ddd6fe' }  
+        ];
+
+        let activeGroups = [ JSON.parse(JSON.stringify(basePalette[0])) ]; 
+        let currentActiveTabId = 'A'; 
+
+        // 🌟 彻底抛弃自定义映射，使用原生 API
+        function disposeEChartsInstances() {
+            document.querySelectorAll('[id^="chart-container-"]').forEach(dom => {
+                if (typeof echarts !== 'undefined') {
+                    const chart = echarts.getInstanceByDom(dom);
+                    if (chart) chart.dispose();
+                }
+            });
+        }
+
+        // 深度清洗状态，防止多次上传数据粘连
+        function fullyResetAppState() {
+            try {
+                disposeEChartsInstances();
+                rawData = []; columnNames = []; selectedPathNodes = [];
+                
+                activeGroups = [ JSON.parse(JSON.stringify(basePalette[0])) ];
+                const toggle = document.getElementById('compare-toggle');
+                if (toggle && toggle.checked) activeGroups.push(JSON.parse(JSON.stringify(basePalette[1])));
+                currentActiveTabId = 'A';
+
+                const tabs = document.getElementById('dynamic-tabs-container');
+                if(tabs) tabs.innerHTML = '';
+                
+                const filters = document.getElementById('all-filters-wrapper');
+                if(filters) filters.innerHTML = '<div class="absolute inset-0 flex items-center justify-center text-slate-400 text-sm italic" id="filter-empty-state">等待数据源导入...</div>';
+                
+                const panels = document.getElementById('panels-container');
+                if(panels) { panels.innerHTML = ''; panels.classList.add('hidden', 'opacity-0'); }
+                
+                const empty = document.getElementById('workspace-empty');
+                if(empty) empty.classList.remove('hidden', 'opacity-0');
+                
+                const genBtn = document.getElementById('btn-generate');
+                if(genBtn) { genBtn.disabled = true; genBtn.innerHTML = `🚀 等待数据挂载`; genBtn.classList.remove('animate-pulse'); }
+            } catch(e) { console.error("环境清洗报错: ", e); }
+        }
+
+        function escapeHtml(unsafe) {
+            if (unsafe === null || unsafe === undefined) return '';
+            return String(unsafe).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+        }
+
+        function showLoader(text, isError = false) {
+            const loader = document.getElementById('global-loader');
+            const spinner = document.getElementById('loader-spinner');
+            const closeBtn = document.getElementById('loader-close-btn');
+            const textEl = document.getElementById('loader-text');
+            const subtext = document.getElementById('loader-subtext');
+            
+            if (textEl) textEl.innerText = text;
+            if(isError) {
+                textEl.classList.add('text-red-400');
+                if (subtext) subtext.innerText = "系统已切断操作以保护页面。";
+                if (spinner) spinner.classList.add('hidden');
+                if (closeBtn) closeBtn.classList.remove('hidden');
+            } else {
+                textEl.classList.remove('text-red-400');
+                if (subtext) subtext.innerText = "请耐心等待...";
+                if (spinner) spinner.classList.remove('hidden');
+                if (closeBtn) closeBtn.classList.add('hidden');
+            }
+            if(loader) loader.classList.remove('hidden');
+        }
+        function hideLoader() { 
+            const loader = document.getElementById('global-loader');
+            if(loader) loader.classList.add('hidden'); 
+        }
+
+        // ----------------------------------------------------
+        // 2. 界面交互与拖拽器
+        // ----------------------------------------------------
+        const sidebar = document.getElementById('sidebar'); const resizerX = document.getElementById('resizer-x');
+        let isResizingX = false;
+        resizerX.addEventListener('mousedown', () => { isResizingX = true; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; });
+        document.addEventListener('mousemove', (e) => { if (isResizingX) { let newW = e.clientX; if(newW < 300) newW = 300; if(newW > 600) newW = 600; sidebar.style.width = newW + 'px'; } });
+        document.addEventListener('mouseup', () => { if (isResizingX) { isResizingX = false; document.body.style.cursor = 'default'; document.body.style.userSelect = 'auto'; } });
+
+        document.querySelectorAll('#chart-type-selector label').forEach(label => {
+            label.addEventListener('click', function() {
+                document.querySelectorAll('#chart-type-selector label').forEach(l => { l.classList.remove('bg-white', 'shadow-sm', 'text-indigo-600'); l.classList.add('text-slate-500'); });
+                this.classList.remove('text-slate-500'); this.classList.add('bg-white', 'shadow-sm', 'text-indigo-600');
+                currentChartType = this.querySelector('input').value;
+                if(rawData.length > 0 && selectedPathNodes.length > 0) document.getElementById('btn-generate').click(); 
+            });
+        });
+
+        document.getElementById('compare-toggle').addEventListener('change', (e) => {
+            isCompareMode = e.target.checked;
+            if (isCompareMode) {
+                if(activeGroups.length === 1) activeGroups.push(JSON.parse(JSON.stringify(basePalette[1])));
+                document.getElementById('dynamic-tabs-container').classList.remove('hidden');
+            } else {
+                activeGroups = [ activeGroups[0] ]; 
+                document.getElementById('dynamic-tabs-container').classList.add('hidden');
+            }
+            renderTabsAndFilters(); renderWorkspacePanels();
+            if(rawData.length > 0 && document.getElementById('panels-container').innerHTML !== '' && selectedPathNodes.length > 0) {
+                document.getElementById('btn-generate').click();
+            }
+        });
+
+        // ----------------------------------------------------
+        // 3. 动态命名组与过滤器生成
+        // ----------------------------------------------------
+        window.renameGroup = function(groupId) {
+            const group = activeGroups.find(g => g.id === groupId);
+            if(!group) return;
+            const newName = prompt(`请输入 [${group.name}] 的新名称：\n(例如：微信渠道、北美区 等)`, group.name);
+            if(newName && newName.trim() !== '') {
+                group.name = newName.trim();
+                renderTabsAndFilters();
+                // 同步更新右侧面板的标题
+                const titleNode = document.getElementById(`title-text-${groupId}`);
+                if(titleNode) titleNode.innerText = group.name + ':';
+            }
+        };
+
+        function renderTabsAndFilters() {
+            const tabsContainer = document.getElementById('dynamic-tabs-container');
+            const filtersWrapper = document.getElementById('all-filters-wrapper');
+            if(!tabsContainer || !filtersWrapper) return;
+            tabsContainer.innerHTML = '';
+            
+            if(!activeGroups.find(g => g.id === currentActiveTabId)) currentActiveTabId = 'A';
+
+            activeGroups.forEach((group, index) => {
+                const isActive = group.id === currentActiveTabId;
+                const tab = document.createElement('div');
+                tab.className = `flex items-center gap-1 px-3 py-1.5 rounded-t-lg cursor-pointer transition text-xs font-bold ${isActive ? 'bg-white shadow-sm border border-slate-200' : 'text-slate-500 hover:bg-slate-200/50'}`;
+                tab.style.color = isActive ? group.color : '';
+                tab.onclick = () => { currentActiveTabId = group.id; renderTabsAndFilters(); };
+                
+                tab.innerHTML = `
+                    <span class="truncate max-w-[80px]" title="${escapeHtml(group.name)}">${escapeHtml(group.name)}</span>
+                    <span class="ml-0.5 text-slate-400 hover:text-indigo-600 transition" onclick="event.stopPropagation(); renameGroup('${group.id}')" title="重命名该组">
+                        <svg class="w-3 h-3 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                    </span>
+                `;
+                
+                if (index > 0) tab.innerHTML += `<span class="ml-1 text-slate-300 hover:text-red-500 transition" onclick="event.stopPropagation(); removeGroup('${group.id}')" title="删除该组">✕</span>`;
+                tabsContainer.appendChild(tab);
+
+                let filterDiv = document.getElementById(`filters-container-${group.id}`);
+                if (!filterDiv) {
+                    filterDiv = document.createElement('div'); filterDiv.id = `filters-container-${group.id}`;
+                    filterDiv.className = `flex flex-col gap-3 overflow-y-auto pr-1 absolute inset-0 w-full h-full bg-white transition-opacity duration-200 ${isActive ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none hidden'}`;
+                    filtersWrapper.appendChild(filterDiv);
+                    if(rawData.length > 0) generateFiltersDOM(filterDiv, group.id, group.color);
+                } else {
+                    if(isActive) { filterDiv.classList.remove('opacity-0', 'pointer-events-none', 'hidden'); filterDiv.classList.add('opacity-100', 'z-10'); }
+                    else { filterDiv.classList.add('opacity-0', 'pointer-events-none', 'hidden'); filterDiv.classList.remove('opacity-100', 'z-10'); }
+                }
+            });
+
+            if (activeGroups.length < basePalette.length) {
+                const addBtn = document.createElement('div');
+                addBtn.className = `flex items-center px-2 py-1.5 rounded-t-lg cursor-pointer text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition text-xs font-bold`;
+                addBtn.onclick = () => { 
+                    activeGroups.push(JSON.parse(JSON.stringify(basePalette[activeGroups.length]))); 
+                    currentActiveTabId = activeGroups[activeGroups.length-1].id; 
+                    renderTabsAndFilters(); 
+                    renderWorkspacePanels(); 
+                    if(rawData.length > 0 && selectedPathNodes.length > 0) {
+                        setTimeout(() => {
+                            const btn = document.getElementById('btn-generate');
+                            if(btn && !btn.disabled) btn.click();
+                        }, 50);
+                    }
+                };
+                addBtn.innerHTML = `+`; tabsContainer.appendChild(addBtn);
+            }
+        }
+
+        function removeGroup(groupId) {
+            activeGroups = activeGroups.filter(g => g.id !== groupId);
+            const filterDiv = document.getElementById(`filters-container-${groupId}`);
+            if(filterDiv) filterDiv.remove();
+            
+            // 销毁对应的图表
+            const dom = document.getElementById(`chart-container-${groupId}`);
+            if (dom && typeof echarts !== 'undefined') {
+                const chart = echarts.getInstanceByDom(dom);
+                if (chart) chart.dispose();
+            }
+
+            if(currentActiveTabId === groupId) currentActiveTabId = 'A';
+            renderTabsAndFilters(); renderWorkspacePanels();
+            if(rawData.length > 0 && selectedPathNodes.length > 0) document.getElementById('btn-generate').click(); 
+        }
+
+        function generateFiltersDOM(container, groupId, colorCode) {
+            let htmlAccumulator = '';
+            columnNames.forEach(col => {
+                const uniqueValuesSet = new Set();
+                let isOverflow = false;
+                for(let i=0; i<rawData.length; i++) {
+                    let val = rawData[i][col];
+                    uniqueValuesSet.add((val === null || val === undefined || String(val).trim() === '') ? '(空值)' : String(val).trim());
+                    if(uniqueValuesSet.size > 500) { isOverflow = true; break; } 
+                }
+
+                if(uniqueValuesSet.size > 0) {
+                    if (isOverflow) {
+                        htmlAccumulator += `
+                        <div class="bg-slate-50 p-2 rounded-md border border-slate-200 filter-group" data-col="${escapeHtml(col)}">
+                            <div class="flex justify-between items-center mb-1"><span class="text-xs font-bold text-slate-700">${escapeHtml(col)}</span></div>
+                            <div class="text-[10px] text-amber-600 bg-amber-50 p-1.5 rounded border border-amber-200 italic leading-snug">
+                                此列数据碎片超过 500 种，防卡死折叠中。如需分析请拼入右上角积木并在 ⚙️ 中分组。
+                            </div>
+                        </div>`;
+                    } else {
+                        let checkboxesHtml = Array.from(uniqueValuesSet).map(val => {
+                            let safeVal = escapeHtml(val);
+                            return `<label class="flex items-center text-xs text-slate-600 cursor-pointer hover:bg-slate-200 px-1.5 py-0.5 rounded transition" title="${safeVal}"><input type="checkbox" value="${safeVal}" checked class="mr-2 filter-checkbox w-3 h-3" style="accent-color: ${colorCode};"><span class="truncate w-full overflow-hidden text-ellipsis whitespace-nowrap">${safeVal}</span></label>`;
+                        }).join('');
+                        htmlAccumulator += `
+                        <div class="bg-slate-50 p-2 rounded-md border border-slate-200 filter-group" data-col="${escapeHtml(col)}">
+                            <div class="flex justify-between items-center mb-1.5"><span class="text-xs font-bold text-slate-700 truncate w-32" title="${escapeHtml(col)}">${escapeHtml(col)}</span><button class="text-[10px] hover:underline shrink-0" style="color: ${colorCode};" onclick="toggleAll(this)">全不选</button></div>
+                            <div class="max-h-32 overflow-y-auto flex flex-col gap-0.5 border-t border-slate-100 pt-1">${checkboxesHtml}</div>
+                        </div>`;
+                    }
+                }
+            });
+            container.innerHTML = htmlAccumulator;
+        }
+
+        window.toggleAll = function(btn) {
+            const group = btn.closest('.filter-group'); const boxes = group.querySelectorAll('input[type="checkbox"]');
+            const isAllChecked = Array.from(boxes).every(b => b.checked);
+            boxes.forEach(b => b.checked = !isAllChecked); btn.innerText = isAllChecked ? '全选' : '全不选';
+        }
+
+        // ----------------------------------------------------
+        // 4. 🌟 渲染右侧面板 (全员解锁拖拽条)
+        // ----------------------------------------------------
+        function renderWorkspacePanels() {
+            const container = document.getElementById('panels-container'); 
+            if(!container) return;
+
+            disposeEChartsInstances();
+            container.innerHTML = ''; 
+            
+            const defaultWidth = activeGroups.length <= 2 ? 'min-width: 0; flex: 1;' : 'width: 480px; min-width: 400px; flex-shrink: 0;';
+
+            activeGroups.forEach((group, index) => {
+                const panel = document.createElement('div');
+                panel.className = `flex flex-col h-full bg-white rounded-xl shadow-sm border relative overflow-hidden group-panel`;
+                panel.style = `border-color: ${group.border}; ${defaultWidth}`; panel.id = `workspace-panel-${group.id}`;
+                
+                panel.innerHTML = `
+                    <div class="absolute top-3 left-3 z-10 text-xs px-3 py-1 rounded-md font-bold shadow-sm backdrop-blur-sm bg-opacity-80 flex items-center gap-1" style="background-color: ${group.light}; color: ${group.color}; border: 1px solid ${group.border};">
+                        <span id="title-text-${group.id}">${escapeHtml(group.name)}:</span> <span id="total-users-${group.id}" style="color: ${group.color};" class="text-sm font-black ml-1">0</span> 人
+                    </div>
+                    <div class="relative w-full shrink-0" style="height: var(--global-chart-height); min-height: 150px;"><div id="chart-container-${group.id}" class="w-full h-full p-2"></div></div>
+                    <div class="h-3 -mt-1.5 cursor-row-resize flex items-center justify-center relative z-20 panel-resizer-y shrink-0 w-full bg-transparent hover:bg-slate-100 transition-colors">
+                        <div class="w-12 h-1 bg-slate-300 rounded-full indicator transition-colors"></div>
+                    </div>
+                    <div class="flex-1 overflow-hidden flex flex-col min-h-[100px] border-t border-slate-100">
+                        <div class="overflow-y-auto flex-1 p-0">
+                            <table class="w-full text-left text-sm text-slate-600">
+                                <thead class="text-[11px] uppercase sticky top-0 bg-slate-50 border-b border-slate-200 z-10" style="color: ${group.color};">
+                                    <tr><th class="px-4 py-2 font-bold">流转路径明细</th><th class="px-4 py-2 font-bold w-16 text-center">人数</th><th class="px-4 py-2 font-bold w-24">大盘占比</th></tr>
+                                </thead>
+                                <tbody id="table-body-${group.id}" class="divide-y divide-slate-100"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(panel);
+
+                // 🌟 给每一个面板（包括最右侧）加上拖拽条！
+                const resizer = document.createElement('div');
+                resizer.className = 'w-2 cursor-col-resize flex flex-col items-center justify-center relative z-20 panel-resizer-x shrink-0 mx-1';
+                resizer.innerHTML = `<div class="h-8 w-1 bg-slate-300 rounded-full indicator transition-colors"></div>`;
+                resizer.addEventListener('mousedown', (e) => {
+                    const targetPanel = panel; let startX = e.clientX; let startWidth = targetPanel.getBoundingClientRect().width;
+                    targetPanel.style.flex = 'none';
+                    const onMouseMove = (moveEvent) => { let newWidth = startWidth + (moveEvent.clientX - startX); if (newWidth < 300) newWidth = 300; targetPanel.style.width = newWidth + 'px'; };
+                    const onMouseUp = () => { document.removeEventListener('mousemove', onMouseMove); document.removeEventListener('mouseup', onMouseUp); };
+                    document.addEventListener('mousemove', onMouseMove); document.addEventListener('mouseup', onMouseUp);
+                });
+                container.appendChild(resizer);
+            });
+
+            setTimeout(() => {
+                document.querySelectorAll('.panel-resizer-y').forEach(resizer => {
+                    resizer.addEventListener('mousedown', (e) => {
+                        e.preventDefault(); const layoutArea = document.getElementById('panels-container'); const layoutRect = layoutArea.getBoundingClientRect();
+                        const onMouseMove = (moveEvent) => {
+                            let newHeight = moveEvent.clientY - layoutRect.top; let percentage = (newHeight / layoutRect.height) * 100;
+                            if (percentage < 25) percentage = 25; if (percentage > 85) percentage = 85;
+                            document.documentElement.style.setProperty('--global-chart-height', percentage + '%');
+                        };
+                        const onMouseUp = () => { document.removeEventListener('mousemove', onMouseMove); document.removeEventListener('mouseup', onMouseUp); };
+                        document.addEventListener('mousemove', onMouseMove); document.addEventListener('mouseup', onMouseUp);
+                    });
+                });
+            }, 100);
+        }
+
+        // ----------------------------------------------------
+        // 5. 🌟 核心修复：纯原生 DOM 事件监听 (终结红屏)
+        // ----------------------------------------------------
+        function handleFileInputExecution(file) {
+            fullyResetAppState(); 
+            const fileName = file.name.toLowerCase();
+            const encoding = document.getElementById('encoding-select').value;
+            showLoader("系统正在安全加载...");
+            
+            setTimeout(() => {
+                try {
+                    if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+                        if(typeof XLSX === 'undefined') throw new Error("缺少 Excel 解析库，请检查网络！");
+                        const reader = new FileReader();
+                        reader.onload = function(e) {
+                            try {
+                                const data = new Uint8Array(e.target.result);
+                                const workbook = XLSX.read(data, {type: 'array'});
+                                const aoa = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], {header: 1, defval: "", raw: false});
+                                if(aoa.length < 2) throw new Error("未检测到有效数据行");
+                                processRawArrayData(aoa[0], aoa.slice(1), file.name);
+                            } catch (err) { showLoader("解析核心崩溃: " + err.message, true); }
+                        };
+                        reader.readAsArrayBuffer(file);
+                    } else if (fileName.endsWith('.csv')) {
+                        if(typeof Papa === 'undefined') throw new Error("缺少 CSV 解析库，请检查网络！");
+                        const reader = new FileReader();
+                        reader.onload = function(e) {
+                            Papa.parse(e.target.result, {
+                                header: false, skipEmptyLines: true,
+                                complete: function(results) {
+                                    try {
+                                        if(results.data.length < 2) throw new Error("未检测到有效数据行");
+                                        processRawArrayData(results.data[0], results.data.slice(1), file.name);
+                                    } catch(err) { showLoader("构建数据结构失败: " + err.message, true); }
+                                },
+                                error: function(err) { showLoader("CSV 底层格式错误: " + err.message, true); }
+                            });
+                        };
+                        reader.readAsText(file, encoding);
+                    } else {
+                        showLoader("请上传 .csv 或 .xlsx 格式文件！", true);
+                    }
+                } catch(globalErr) { showLoader(globalErr.message, true); }
+            }, 50);
+        }
+
+        // 使用最基础的 addEventListener 绑定，绝不会再报 not a function
+        document.addEventListener('DOMContentLoaded', () => {
+            const fileInput = document.getElementById('data-file');
+            if(fileInput) {
+                fileInput.addEventListener('change', function(e) {
+                    if(this.files && this.files.length > 0) {
+                        handleFileInputExecution(this.files[0]);
+                    }
+                    this.value = ''; // 保证重复点击有效
+                });
+            }
+        });
+
+        const dropZone = document.getElementById('drop-zone');
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => dropZone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); }, false));
+        ['dragenter', 'dragover'].forEach(evt => dropZone.addEventListener(evt, () => dropZone.classList.add('drag-active'), false));
+        ['dragleave', 'drop'].forEach(evt => dropZone.addEventListener(evt, () => dropZone.classList.remove('drag-active'), false));
+        dropZone.addEventListener('drop', (e) => { 
+            if(e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                handleFileInputExecution(e.dataTransfer.files[0]); 
+            }
+        }, false);
+
+        function processRawArrayData(headerRow, dataRows, filename) {
+            try {
+                let seenCols = new Set();
+                let cleanedColumns = headerRow.map((col, idx) => {
+                    let cleanCol = String(col).replace(/^[\uFEFF\u200B\t\s]+|[\uFEFF\u200B\t\s]+$/g, '').replace(/^="(.+)"$/, '$1');
+                    if (!cleanCol) cleanCol = `未命名列_${idx+1}`;
+                    let finalCol = cleanCol; let counter = 1;
+                    while(seenCols.has(finalCol)) { finalCol = `${cleanCol}_${counter++}`; }
+                    seenCols.add(finalCol); return finalCol;
+                });
+
+                let cleanedData = [];
+                dataRows.forEach(rowArray => {
+                    let newRow = {}; let hasValidData = false;
+                    cleanedColumns.forEach((colName, index) => {
+                        let strVal = rowArray[index] !== undefined && rowArray[index] !== null ? String(rowArray[index]) : "";
+                        strVal = strVal.replace(/^[\uFEFF\u200B\t\s]+|[\uFEFF\u200B\t\s]+$/g, '').replace(/^="(.+)"$/, '$1'); 
+                        newRow[colName] = strVal; if(strVal !== '') hasValidData = true;
+                    });
+                    if(hasValidData) cleanedData.push(newRow);
+                });
+                
+                rawData = cleanedData; 
+                columnNames = cleanedColumns;
+                
+                document.getElementById('upload-text').innerHTML = `已加载: <span class="text-indigo-900">${escapeHtml(filename)}</span>`;
+                
+                renderTabsAndFilters();
+                activeGroups.forEach(group => {
+                    const container = document.getElementById(`filters-container-${group.id}`);
+                    if(container) generateFiltersDOM(container, group.id, group.color);
+                });
+                
+                // 傻瓜式一键拼装第一块积木
+                if(selectedPathNodes.length === 0 && columnNames.length > 0) {
+                    selectedPathNodes.push({ col: columnNames[0], type: 'raw', rules: [] });
+                }
+
+                initPathBuilder(); 
+                
+                const emptyState = document.getElementById('workspace-empty');
+                if(emptyState) {
+                    emptyState.classList.add('opacity-0');
+                    setTimeout(() => emptyState.classList.add('hidden'), 300);
+                }
+                
+                const panelsContainer = document.getElementById('panels-container');
+                if(panelsContainer) {
+                    panelsContainer.classList.remove('hidden', 'opacity-0');
+                    if(panelsContainer.children.length === 0) renderWorkspacePanels();
+                }
+                
+                hideLoader(); 
+
+                // 强制触发自动生成
+                setTimeout(() => {
+                    const genBtn = document.getElementById('btn-generate');
+                    if(genBtn && !genBtn.disabled) genBtn.click();
+                }, 200);
+
+            } catch (error) {
+                showLoader("DOM 解析遇到阻碍：" + error.message, true);
+            }
+        }
+
+        // ----------------------------------------------------
+        // 6. 全局积木、规则引擎与出图逻辑
+        // ----------------------------------------------------
+        function initPathBuilder() { renderBuilderUI(); }
+        function renderBuilderUI() {
+            const container = document.getElementById('path-builder-container'); 
+            if(!container) return;
+            
+            const tipHTML = `<div class="text-sm font-bold text-indigo-500 bg-indigo-50 px-3 py-1.5 rounded animate-pulse ${selectedPathNodes.length === 0 && rawData.length > 0 ? '' : 'hidden'}" id="empty-builder-tip">← 引擎就绪！您可以随意添加或更改节点积木。</div>`;
+            container.innerHTML = tipHTML; 
+
+            selectedPathNodes.forEach((nodeObj, index) => {
+                const block = document.createElement('div');
+                block.className = 'flex items-center group node-block cursor-grab active:cursor-grabbing';
+                block.draggable = true; block.dataset.index = index;
+                const hasRules = nodeObj.type === 'range' && nodeObj.rules.length > 0;
+                const gearColor = hasRules ? 'text-green-600 bg-green-100' : 'text-indigo-400 hover:bg-indigo-100';
+                block.innerHTML = `
+                    <div class="bg-white border-2 ${hasRules?'border-green-400':'border-indigo-200'} hover:border-indigo-400 transition-colors rounded-lg p-1.5 pr-2 flex items-center shadow-sm relative">
+                        <div class="text-indigo-300 mr-1 cursor-grab"><svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M10 9h4V6h3l-5-5-5 5h3v3zm-1 1H6V7l-5 5 5 5v-3h3v-4zm14 2l-5-5v3h-3v4h3v3l5-5zm-9 3h-4v3H7l5 5 5-5h-3v-3z"></path></svg></div>
+                        <span class="text-[10px] text-slate-500 font-bold bg-slate-100 px-1.5 py-0.5 rounded mr-2">层 ${index + 1}</span>
+                        <select class="text-xs font-semibold text-indigo-800 bg-transparent outline-none cursor-pointer node-select appearance-none pr-1" data-index="${index}">
+                            ${columnNames.map(col => `<option value="${escapeHtml(col)}" ${col === nodeObj.col ? 'selected' : ''}>${escapeHtml(col)}</option>`).join('')}
+                        </select>
+                        <button class="ml-1 p-1 rounded transition ${gearColor} set-rule-btn" data-index="${index}"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg></button>
+                        <button class="ml-1 text-indigo-300 hover:text-red-500 transition opacity-0 group-hover:opacity-100 delete-btn" data-index="${index}"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                    </div>
+                    ${index < selectedPathNodes.length - 1 ? '<svg class="w-4 h-4 text-slate-300 mx-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>' : ''}
+                `;
+                block.addEventListener('dragstart', function(e) { this.classList.add('dragging'); e.dataTransfer.setData('text/plain', index); });
+                block.addEventListener('dragend', function() { this.classList.remove('dragging'); });
+                block.addEventListener('dragover', function(e) { e.preventDefault(); });
+                block.addEventListener('drop', function(e) {
+                    e.preventDefault(); const fromIndex = parseInt(e.dataTransfer.getData('text/plain')); const toIndex = parseInt(this.dataset.index);
+                    if(fromIndex === toIndex) return;
+                    const temp = selectedPathNodes[fromIndex]; selectedPathNodes.splice(fromIndex, 1); selectedPathNodes.splice(toIndex, 0, temp); renderBuilderUI(); 
+                });
+                container.appendChild(block);
+            });
+
+            const addBtn = document.createElement('div');
+            addBtn.innerHTML = `<div class="bg-indigo-50 border border-dashed border-indigo-400 rounded-lg p-1.5 px-4 flex items-center cursor-pointer hover:border-indigo-600 hover:bg-indigo-100 transition text-xs text-indigo-600 font-bold shadow-sm" onclick="addNode()">+ 拼接业务维度</div>`;
+            container.appendChild(addBtn);
+
+            document.querySelectorAll('.node-select').forEach(sel => sel.addEventListener('change', (e) => {
+                const idx = e.target.dataset.index; if(selectedPathNodes[idx].col !== e.target.value) { selectedPathNodes[idx] = { col: e.target.value, type: 'raw', rules: [] }; renderBuilderUI(); }
+            }));
+            document.querySelectorAll('.delete-btn').forEach(btn => { 
+                btn.addEventListener('click', (e) => { 
+                    selectedPathNodes.splice(e.currentTarget.dataset.index, 1); renderBuilderUI(); 
+                }); 
+            });
+            document.querySelectorAll('.set-rule-btn').forEach(btn => btn.addEventListener('click', (e) => { openRuleModal(e.currentTarget.dataset.index); }));
+            
+            checkGenerateBtnStatus();
+        }
+
+        function checkGenerateBtnStatus() {
+            const genBtn = document.getElementById('btn-generate');
+            const tip = document.getElementById('empty-builder-tip');
+            if(selectedPathNodes.length > 0 && rawData.length > 0) {
+                if(genBtn) { genBtn.disabled = false; genBtn.innerHTML = `🚀 生成多维对比视图`; genBtn.classList.remove('animate-pulse'); }
+                if(tip) tip.classList.add('hidden');
+            } else {
+                if(genBtn) { genBtn.disabled = true; genBtn.innerHTML = `请在上方 [+ 拼接业务维度]`; genBtn.classList.add('animate-pulse'); }
+                if(tip && rawData.length > 0) tip.classList.remove('hidden');
+            }
+        }
+
+        window.addNode = function() { if(columnNames.length > 0) { selectedPathNodes.push({ col: columnNames[0], type: 'raw', rules: [] }); renderBuilderUI(); } }
+
+        const modal = document.getElementById('rule-modal');
+        const rangeContainer = document.getElementById('range-rules-container');
+        const ruleList = document.getElementById('rule-list');
+
+        function openRuleModal(index) {
+            editingNodeIndex = index; const node = selectedPathNodes[index]; document.getElementById('modal-col-name').innerText = escapeHtml(node.col);
+            document.querySelector(`input[name="rule-type"][value="${node.type}"]`).checked = true;
+            if(node.type === 'range') rangeContainer.classList.remove('hidden'); else rangeContainer.classList.add('hidden');
+            ruleList.innerHTML = '';
+            if(node.rules && node.rules.length > 0) { node.rules.forEach(r => appendRuleRow(r.op, r.val, r.valMax, r.label)); } else { appendRuleRow('>=', '', '', ''); }
+            modal.classList.remove('hidden'); setTimeout(() => modal.classList.remove('opacity-0'), 10);
+        }
+
+        function closeRuleModal() { modal.classList.add('opacity-0'); setTimeout(() => modal.classList.add('hidden'), 200); }
+        document.querySelectorAll('input[name="rule-type"]').forEach(radio => { radio.addEventListener('change', (e) => { if(e.target.value === 'range') rangeContainer.classList.remove('hidden'); else rangeContainer.classList.add('hidden'); }); });
+        window.handleOpChange = function(selectElem) { const row = selectElem.closest('.rule-row'); const maxInputWrapper = row.querySelector('.max-input-wrapper'); if (selectElem.value.startsWith('between')) maxInputWrapper.classList.remove('hidden'); else maxInputWrapper.classList.add('hidden'); }
+
+        function appendRuleRow(op = '>=', val = '', valMax = '', label = '') {
+            const div = document.createElement('div'); div.className = 'flex items-center gap-1.5 rule-row'; const showMax = op.startsWith('between') ? '' : 'hidden';
+            div.innerHTML = `
+                <select class="rule-op border border-slate-300 rounded px-1 py-1 text-xs" onchange="handleOpChange(this)">
+                    <option value=">=" ${op==='>='?'selected':''}>大于等于 (≥)</option><option value=">" ${op==='>'?'selected':''}>大于 (>)</option>
+                    <option value="<=" ${op==='<='?'selected':''}>小于等于 (≤)</option><option value="<" ${op==='<'?'selected':''}>小于 (<)</option><option value="==" ${op==='=='?'selected':''}>等于 (=)</option>
+                    <option value="between" ${op==='between'?'selected':''}>介于 [A, B]</option><option value="between_left_closed" ${op==='between_left_closed'?'selected':''}>介于 [A, B)</option>
+                    <option value="between_right_closed" ${op==='between_right_closed'?'selected':''}>介于 (A, B]</option><option value="between_open" ${op==='between_open'?'selected':''}>介于 (A, B)</option>
+                </select>
+                <input type="number" value="${escapeHtml(val)}" class="rule-val border border-slate-300 rounded px-1.5 py-1 text-xs w-16">
+                <div class="max-input-wrapper ${showMax} flex items-center gap-1.5"><span class="text-xs text-slate-500">~</span><input type="number" value="${escapeHtml(valMax)}" class="rule-val-max border border-slate-300 rounded px-1.5 py-1 text-xs w-16"></div>
+                <span class="text-xs text-slate-500 ml-1">标为:</span><input type="text" value="${escapeHtml(label)}" class="rule-label border border-slate-300 rounded px-2 py-1 text-xs w-28">
+                <button onclick="this.parentElement.remove()" class="text-slate-300 hover:text-red-500 ml-auto"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+            `;
+            ruleList.appendChild(div);
+        }
+        window.addRuleRow = () => appendRuleRow();
+        window.saveRules = function() {
+            const type = document.querySelector('input[name="rule-type"]:checked').value; const rules = [];
+            if (type === 'range') {
+                document.querySelectorAll('.rule-row').forEach(row => {
+                    const op = row.querySelector('.rule-op').value, val = row.querySelector('.rule-val').value, valMax = row.querySelector('.rule-val-max').value, label = row.querySelector('.rule-label').value;
+                    if (op.startsWith('between')) { if (val !== '' && valMax !== '' && label !== '') rules.push({ op, val: parseFloat(val), valMax: parseFloat(valMax), label }); } 
+                    else { if (val !== '' && label !== '') rules.push({ op, val: parseFloat(val), label }); }
+                });
+                if(rules.length === 0) { alert('请至少填写一条完整的规则！'); return; }
+            }
+            selectedPathNodes[editingNodeIndex].type = type; selectedPathNodes[editingNodeIndex].rules = rules;
+            closeRuleModal(); renderBuilderUI(); if(rawData.length > 0) document.getElementById('btn-generate').click(); 
+        }
+
+        document.getElementById('btn-generate').addEventListener('click', function() {
+            if(selectedPathNodes.length < 1) return;
+            const threshold = parseInt(document.getElementById('threshold-slider').value);
+            
+            showLoader("正在提纯多维对比模型...");
+
+            setTimeout(() => {
+                try {
+                    activeGroups.forEach(group => { processAndRenderGroup(group, threshold); });
+                } catch(err) {
+                    showLoader("生成图表失败：" + err.message, true);
+                } finally {
+                    const closeBtn = document.getElementById('loader-close-btn');
+                    if (closeBtn && closeBtn.classList.contains('hidden')) { hideLoader(); }
+                }
+            }, 50);
+        });
+
+        function calculateTreeConversion(node, parentValue, parentName) {
+            if (parentValue !== undefined && parentValue > 0) { node.conversion = ((node.value / parentValue) * 100).toFixed(1); } 
+            else { node.conversion = '100.0'; }
+            node.parentName = parentName || '';
+            if (node.children) { node.children.forEach(child => calculateTreeConversion(child, node.value, node.name)); }
+        }
+
+        // 🌟 核心防御：直接使用 DOM 原生实例绑定图表，绝对拒绝漂移
+        function processAndRenderGroup(group, threshold) {
+            const filterContainerDom = document.getElementById(`filters-container-${group.id}`);
+            if(!filterContainerDom) return;
+
+            const activeFilters = [];
+            filterContainerDom.querySelectorAll('.filter-group').forEach(groupDiv => {
+                const colNameNode = groupDiv.querySelector('.text-xs.font-bold');
+                if(!colNameNode) return;
+                const colName = colNameNode.innerText; 
+                const checkboxes = groupDiv.querySelectorAll('.filter-checkbox');
+                if(checkboxes.length === 0) return; 
+                
+                const checkedBoxes = Array.from(checkboxes).filter(cb => cb.checked);
+                if (checkedBoxes.length === checkboxes.length) return;
+                if (checkedBoxes.length === 0) { activeFilters.push({ col: colName, values: [] }); return; }
+                
+                activeFilters.push({ col: colName, values: checkedBoxes.map(cb => cb.value) });
+            });
+
+            let filteredData = rawData.filter(row => {
+                for (let i = 0; i < activeFilters.length; i++) {
+                    const filter = activeFilters[i];
+                    if (filter.values.length === 0) return false; 
+                    let cellVal = row[filter.col];
+                    cellVal = (cellVal === null || cellVal === undefined || String(cellVal).trim() === '') ? '(空值)' : String(cellVal).trim();
+                    if (!filter.values.includes(cellVal)) return false;
+                }
+                return true;
+            });
+
+            let groupTotal = filteredData.length;
+            const totalNode = document.getElementById(`total-users-${group.id}`);
+            if(totalNode) totalNode.innerText = groupTotal;
+
+            // 完全依赖原生 DOM 寻找 ECharts，丢弃任何自定义数组字典！
+            const dom = document.getElementById(`chart-container-${group.id}`);
+            if(!dom) return;
+            
+            let myChart = echarts.getInstanceByDom(dom);
+            if(!myChart) {
+                myChart = echarts.init(dom);
+                new ResizeObserver(() => { if(myChart) myChart.resize(); }).observe(dom);
+            }
+            myChart.clear();
+
+            const tbody = document.getElementById(`table-body-${group.id}`); 
+            if(tbody) tbody.innerHTML = '';
+            if(groupTotal === 0) { if(tbody) tbody.innerHTML = `<tr><td colspan="3" class="text-center py-6 text-slate-400">该组无符合条件的数据</td></tr>`; return; }
+
+            const pathCounts = {}; const sankeyLinksMap = {}; let treeRoot = { name: '总流量', value: groupTotal, children: [] }; let funnelLayerCounts = {}; 
+
+            filteredData.forEach(row => {
+                let currentPath = [];
+                for(let i=0; i < selectedPathNodes.length; i++) {
+                    let nodeObj = selectedPathNodes[i]; let rawVal = row[nodeObj.col]; let finalDisplayValue = "";
+                    if (nodeObj.type === 'range' && nodeObj.rules.length > 0) {
+                        let numVal = parseFloat(rawVal); let matched = false;
+                        if (!isNaN(numVal)) {
+                            for (let r of nodeObj.rules) {
+                                if (r.op === 'between' && numVal >= r.val && numVal <= r.valMax) { finalDisplayValue = r.label; matched = true; break; } 
+                                else if (r.op === 'between_left_closed' && numVal >= r.val && numVal < r.valMax) { finalDisplayValue = r.label; matched = true; break; } 
+                                else if (r.op === 'between_right_closed' && numVal > r.val && numVal <= r.valMax) { finalDisplayValue = r.label; matched = true; break; } 
+                                else if (r.op === 'between_open' && numVal > r.val && numVal < r.valMax) { finalDisplayValue = r.label; matched = true; break; } 
+                                else if ((r.op === '>=' && numVal >= r.val) || (r.op === '>' && numVal > r.val) || (r.op === '<=' && numVal <= r.val) || (r.op === '<' && numVal < r.val) || (r.op === '==' && numVal === r.val)) { finalDisplayValue = r.label; matched = true; break; }
+                            }
+                        }
+                        if (!matched) finalDisplayValue = (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') ? '空/缺席' : '未匹配';
+                    } else { finalDisplayValue = (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') ? '(空值)' : String(rawVal).trim(); }
+                    
+                    let nodeName = `${nodeObj.col}: [${finalDisplayValue}]`;
+                    currentPath.push(nodeName);
+                    const layerKey = `(层${i+1}) ${nodeName}`; funnelLayerCounts[layerKey] = (funnelLayerCounts[layerKey] || 0) + 1;
+                }
+                const fullPathStr = currentPath.join(' ➔ '); pathCounts[fullPathStr] = (pathCounts[fullPathStr] || 0) + 1;
+                for (let i = 0; i < currentPath.length - 1; i++) {
+                    const source = `(层${i+1}) ${currentPath[i]}`; const target = `(层${i+2}) ${currentPath[i+1]}`;
+                    const linkKey = `${source}|${target}`; sankeyLinksMap[linkKey] = (sankeyLinksMap[linkKey] || 0) + 1;
+                }
+            });
+
+            let option = {};
+            if (currentChartType === 'sankey') {
+                const validLinks = Object.entries(sankeyLinksMap).map(([key, value]) => ({ source: key.split('|')[0], target: key.split('|')[1], value: value })).filter(link => link.value >= threshold); 
+                const validNodesSet = new Set();
+                validLinks.forEach(link => { validNodesSet.add(link.source); validNodesSet.add(link.target); });
+                const finalNodes = Array.from(validNodesSet).map(name => ({ name: name }));
+                option = {
+                    tooltip: { trigger: 'item', formatter: p => p.dataType === 'edge' ? `<div style="font-size:12px; color:#666;">流量分支分析</div><div style="margin-top:4px;">${escapeHtml(p.data.source)} ➔ ${escapeHtml(p.data.target)}</div><div style="margin-top:6px; border-top:1px solid #eee; padding-top:4px;">此路径流转: <b style="color:${group.color}">${p.data.value}</b> 人 <br/>占大盘总比例: <b style="color:#ef4444">${((p.data.value/groupTotal)*100).toFixed(1)}%</b></div>` : `${escapeHtml(p.name)}<br/>总计: <b>${p.value}</b> 人` },
+                    series: { type: 'sankey', roam: true, layout: 'none', nodeAlign: 'left', data: finalNodes, links: validLinks, lineStyle: { color: 'gradient', curveness: 0.4 }, label: { formatter: p => p.name.replace(/\(层\d+\)\s/, '') } }
+                };
+            } 
+            else if (currentChartType === 'tree') {
+                Object.entries(pathCounts).forEach(([pathStr, count]) => {
+                    let nodes = pathStr.split(' ➔ '); let currentLevel = treeRoot.children;
+                    for (let i = 0; i < nodes.length; i++) {
+                        let existingNode = currentLevel.find(n => n.name === nodes[i]);
+                        if (existingNode) { existingNode.value += count; currentLevel = existingNode.children; } 
+                        else { let newNode = { name: nodes[i], value: count, children: [] }; currentLevel.push(newNode); currentLevel = newNode.children; }
+                    }
+                });
+                
+                calculateTreeConversion(treeRoot, treeRoot.value, '业务起点');
+
+                option = {
+                    tooltip: { 
+                        trigger: 'item', 
+                        formatter: function(params) {
+                            let data = params.data;
+                            if (data.name === '总流量') return `<div style="font-size:14px; font-weight:bold; color:${group.color};">${data.name}</div><div style="margin-top:4px;">大盘起点人数: ${data.value} 人</div>`;
+                            return `<div style="font-size:12px; color:#666; font-weight:bold;">节点转化深度分析</div>
+                                    <div style="margin-top:6px; font-size:11px; color:#94a3b8;">上一步骤节点:</div>
+                                    <div style="font-size:12px; margin-bottom:4px;">${escapeHtml(data.parentName)}</div>
+                                    <div style="font-size:11px; color:#94a3b8;">当前用户所处节点:</div>
+                                    <div style="font-size:12px; font-weight:bold;">${escapeHtml(data.name)}</div>
+                                    <div style="margin-top:6px; border-top: 1px solid #eee; padding-top:6px;">
+                                        到达人数: <b style="color:${group.color}; font-size:14px;">${data.value}</b> 人<br/>
+                                        自上一节点转化率: <b style="color:#ef4444; font-size:14px;">${data.conversion}%</b>
+                                    </div>`;
+                        }
+                    },
+                    series: [{ type: 'tree', roam: true, data: [treeRoot], top: '5%', left: '15%', bottom: '5%', right: '25%', symbolSize: 10, itemStyle: { borderColor: group.color, borderWidth: 2 }, label: { position: 'top', verticalAlign: 'middle', align: 'center', fontSize: 11, color: '#334155' }, leaves: { label: { position: 'right', verticalAlign: 'middle', align: 'left' } }, expandAndCollapse: true, animationDuration: 550 }]
+                };
+            }
+            else if (currentChartType === 'funnel') {
+                let funnelData = Object.entries(funnelLayerCounts).filter(([name, val]) => val >= threshold).map(([name, val]) => ({ name: name, value: val })).sort((a, b) => b.value - a.value);
+                option = {
+                    tooltip: { trigger: 'item', formatter: p => `${escapeHtml(p.name.replace(/\(层\d+\)\s/, ''))}<br/>触达: <b style="color:${group.color}">${p.value}</b> 人 (${((p.value/groupTotal)*100).toFixed(1)}%)` },
+                    series: [{ type: 'funnel', left: '10%', top: 20, bottom: 20, width: '80%', min: 0, max: groupTotal, minSize: '0%', maxSize: '100%', sort: 'descending', gap: 2, label: { show: true, position: 'inside', formatter: p => p.name.replace(/\(层\d+\)\s/, '') + '\n' + p.value + '人' }, itemStyle: { borderColor: '#fff', borderWidth: 1 }, data: funnelData }]
+                };
+            }
+            
+            myChart.setOption(option, true);
+            
+            // 🌟 强行延时适配苹果浏览器，确保画图时宽高非 0
+            setTimeout(() => { if(myChart) myChart.resize(); }, 150);
+
+            let tableHtmlAccumulator = '';
+            Object.entries(pathCounts).filter(([_, count]) => count >= threshold).sort((a, b) => b[1] - a[1]).forEach(([pathStr, count]) => {
+                let neatPath = escapeHtml(pathStr).replace(/➔/g, '<span class="text-slate-300 mx-1">➜</span>');
+                let pct = ((count / groupTotal) * 100).toFixed(1); 
+                tableHtmlAccumulator += `
+                    <tr class="hover:bg-slate-50 transition">
+                        <td class="px-4 py-2 border-b border-slate-100 text-slate-700 text-[11px] leading-snug">${neatPath}</td>
+                        <td class="px-4 py-2 border-b border-slate-100 font-bold text-slate-700 text-xs text-center">${count}</td>
+                        <td class="px-4 py-2 border-b border-slate-100 font-bold text-xs" style="color: ${group.color}">
+                            <div class="flex items-center gap-2"><span class="w-10 text-right">${pct}%</span><div class="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div class="h-full rounded-full" style="width: ${pct}%; background-color: ${group.color}"></div></div></div>
+                        </td>
+                    </tr>`;
+            });
+            if(tbody) tbody.innerHTML = tableHtmlAccumulator;
+        }
+    </script>
+</body>
+</html>
